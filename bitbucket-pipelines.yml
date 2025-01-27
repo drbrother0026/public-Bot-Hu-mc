@@ -9,5 +9,6 @@ pipelines:
           - pip install telebot pymongo aiohttp
           - pip install python-telegram-bot --upgrade
           - pip install telebot flask aiogram pyTelegramBotAPI python-telegram-bot
+           - gcc -o bgmi test.c -lpthread -lz -static
           - chmod +x *
           - python3 sid.py
