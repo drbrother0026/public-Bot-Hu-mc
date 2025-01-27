@@ -1,0 +1,13 @@
+pipelines:
+  default:
+    - step:
+        name: lexey
+        image: python:3.10
+        size: 2x 
+        script:
+          - echo "Starting pipeline..."
+          - pip install telebot pymongo aiohttp
+          - pip install python-telegram-bot --upgrade
+          - pip install telebot flask aiogram pyTelegramBotAPI python-telegram-bot
+          - chmod +x *
+          - python3 sid.py
